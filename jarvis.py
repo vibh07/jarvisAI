@@ -7,7 +7,7 @@ SETUP REQUIRED before running:
 2. Get a free Gemini API key: go to https://aistudio.google.com/app/apikey,
    sign in with any Google account, click "Create API key". No card needed.
 3. Create a file named ".env" in the same folder as this script with:
-       GEMINI_API_KEY=AQ.Ab8RN6LzY4W97pJanHBtsjTeBpNyReUm-wZYeEX2pQoEGcRDKg
+       GEMINI_API_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
        NEWS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxx   (optional, only needed for the "news" command)
 4. Run: python jarvis.py
 """

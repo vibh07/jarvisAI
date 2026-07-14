@@ -1,4 +1,19 @@
+"""
+Jarvis Voice Assistant - natural, ChatGPT/Gemini-style conversation, powered by
+Google Gemini's FREE API tier (no credit card, no payment needed).
+
+SETUP REQUIRED before running:
+1. pip install google-genai python-decouple SpeechRecognition pyttsx3 pywhatkit wikipedia requests pypiwin32
+2. Get a free Gemini API key: go to https://aistudio.google.com/app/apikey,
+   sign in with any Google account, click "Create API key". No card needed.
+3. Create a file named ".env" in the same folder as this script with:
+       GEMINI_API_KEY=AQ.Ab8RN6LzY4W97pJanHBtsjTeBpNyReUm-wZYeEX2pQoEGcRDKg
+       NEWS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxx   (optional, only needed for the "news" command)
+4. Run: python jarvis.py
+"""
+
 import datetime
+import re
 import pyttsx3
 import speech_recognition as sr
 import wikipedia
@@ -7,128 +22,162 @@ import os
 import subprocess as sp
 import requests
 import pywhatkit as kit
-from email.message import EmailMessage
-import sched
 from decouple import config
-import requests
+from google import genai
+from google.genai import types
 from pprint import pprint
 
+# ------------------------------------------------------------------
+# TEXT TO SPEECH SETUP
+# ------------------------------------------------------------------
+VOICE_INDEX = 0  # voice[0] = usually a male voice, voice[1] = usually female (Windows default)
 
-engine = pyttsx3.init('sapi5') 
-voices = engine.getProperty('voices')
-print(voices[1].id)
-engine.setProperty('voice',voices[0].id)
+# ------------------------------------------------------------------
+# GEMINI SETUP (FREE tier) -> yahi cheez ab Jarvis ko ChatGPT/Gemini
+# jaisa natural, conversational bana degi -- bina ek rupaya kharch kiye
+# ------------------------------------------------------------------
+gemini_client = genai.Client(api_key=config("GEMINI_API_KEY"))
+
+# Chat session khud conversation memory maintain karta hai -- isi se
+# follow-up sawaal bhi context ke saath samajh mein aate hain, bilkul
+# ChatGPT/Gemini voice mode ki tarah
+chat_session = gemini_client.chats.create(
+    model="gemini-3.5-flash",  # current free-tier model, generous daily limit
+    config=types.GenerateContentConfig(
+        system_instruction=(
+            "You are Jarvis, a warm and witty voice assistant speaking to your user "
+            "out loud. Keep every reply short -- 1 to 3 sentences -- natural and "
+            "conversational, since a text-to-speech engine will read it aloud. "
+            "Never use markdown, bullet points, asterisks, or emojis, since those "
+            "cannot be spoken. If you don't know the answer, say so honestly."
+        ),
+        thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
+    )
+)
+
+
+def ask_jarvis(user_text):
+    """
+    User ki baat Gemini ko bhejta hai -- chat_session khud history sambhalta
+    hai, isliye natural back-and-forth baatcheet possible hoti hai.
+
+    Response STREAM mein aata hai aur jaise hi ek poora sentence ban jaata hai,
+    Jarvis turant usse bolna shuru kar deta hai (baaki text peeche generate
+    hota rehta hai) -- isse poore jawab ka wait nahi karna padta, delay bahut
+    kam mehsoos hota hai, bilkul ChatGPT/Gemini voice mode ki tarah.
+    Print aur speak dono yahin ho jaate hain, isliye har jawab guaranteed
+    bola bhi jaata hai, sirf text nahi rehta.
+    """
+    buffer = ""
+    try:
+        for chunk in chat_session.send_message_stream(user_text):
+            if not chunk.text:
+                continue
+            buffer += chunk.text
+
+            # jaise hi ek complete sentence mil jaaye, turant bol do
+            while True:
+                match = re.search(r'[.!?](\s|$)', buffer)
+                if not match:
+                    break
+                sentence = buffer[:match.end()].strip()
+                buffer = buffer[match.end():]
+                if sentence:
+                    print(f"Jarvis: {sentence}")
+                    speak(sentence)
+
+        leftover = buffer.strip()
+        if leftover:
+            print(f"Jarvis: {leftover}")
+            speak(leftover)
+
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        error_msg = "Sorry sir, I couldn't reach my brain right now. Please check the API key or your internet."
+        print(f"Jarvis: {error_msg}")
+        speak(error_msg)
+
 
 def takeCommand():
-
-    # It takes microphone input from the user and returns string output
-
+    """
+    Microphone se voice input leta hai aur usse text mein convert karke return karta hai.
+    """
     r = sr.Recognizer()
     with sr.Microphone(0) as source:
-        speak("i am listening sir!")
         print("Listening...")
         r.pause_threshold = 1
+        r.adjust_for_ambient_noise(source, duration=0.5)
         audio = r.listen(source)
 
     try:
-        print("Recognizing...")    
-        query = r.recognize_google(audio, language='en-in') #Using google for voice recognition.
-        print(f"User said: {query}\n")  #User query will be printed.
-
-    except Exception as e:
-        # print(e)    
-        print("Say that again please...")   #Say that again will be printed in case of improper voice 
-        return "None" #None string will be returned
-    return query
-
-# ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-               
-
-def takeCommands():
-    '''
-    It takes user's voice as input
-    '''
-    r=sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Listening...")
-        r.pause_threshold = 1
-        audio=r.listen(source)
-
-    try:
         print("Recognizing...")
-        query = r.recognize_google(audio, language="en-in")
-        print(f"Recognized Command: {query}")
-
-    except Exception as e:
-        print(e)
-        print("I didn't recognize what you said please repeat")
+        query = r.recognize_google(audio, language='en-in')
+        print(f"User said: {query}\n")
+    except Exception:
+        print("Sorry, didn't catch that. Please say it again...")
         return "None"
-
     return query
 
-def speak(audio   ):  #, Ticon
-    # if  Ticon == 1:
-        engine.say(audio)
-        engine.runAndWait()
-        
-  
+
+def speak(audio):
+    """
+    Har call pe fresh engine banate hain -- SAPI5 mein known issue hai ki
+    same engine instance se baar-baar bolne pe (jaise streaming mein
+    multiple sentences) awaaz silently band ho jaati hai, sirf text reh
+    jaata hai. Naya engine har baar reliably bolta hai.
+    """
+    tts_engine = pyttsx3.init('sapi5')
+    tts_voices = tts_engine.getProperty('voices')
+    tts_engine.setProperty('voice', tts_voices[VOICE_INDEX].id)
+    tts_engine.setProperty('rate', 175)
+    tts_engine.say(audio)
+    tts_engine.runAndWait()
+    tts_engine.stop()
+
 
 def wishMe():
     hour = int(datetime.datetime.now().hour)
-    if hour>=0 and hour<12:
+    if 0 <= hour < 12:
         speak("Good Morning!")
-
-    elif hour>=12 and hour<18:
+    elif 12 <= hour < 18:
         speak("Good Afternoon!")
-
     else:
         speak("Good Evening!")
+    speak("I am jarvis sir. Please tell me how may i help you")
 
-        speak("I am jarvis sir . Please tell me how may i help you")
 
 def search_on_google(query):
-    kit.search(query) 
+    kit.search(query)
+
 
 def open_camera():
     sp.run('start microsoft.windows.camera:', shell=True)
 
+
 def open_notepad():
-    # os.startfile("C:\\program Files\\WindowsApp\\Microsoft.WindowsNotepad_11.2210.5.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe")
     path = "C:\\Program Files\\Notepad++\\notepad++.exe"
     os.startfile(path)
+
 
 def open_cmd():
     os.system('start cmd')
 
+
 def open_calculator():
     sp.Popen(paths['calculator'])
 
+
 def send_whatsapp_message(number, message):
     kit.sendwhatmsg_instantly(f"+91{number}", message)
+
 
 def find_my_ip():
     ip_address = requests.get('https://api64.ipify.org?format=json').json()
     return ip_address["ip"]
 
- #//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-#  TMDB_API_KEY = config("TMDB_API_KEY")  
-
-
-# def get_trending_movies():
-#     trending_movies = []
-#     res = requests.get(
-#         f"https://api.themoviedb.org/3/trending/movie/day?api_key={TMDB_API_KEY}").json()
-#     results = res["results"]
-#     for r in results:
-#         trending_movies.append(r["original_title"])
-#     return trending_movies[:5]
-
-# /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 def get_latest_news():
-    NEWS_API_KEY = config("a106524326d44ba483caedc576a60dce")
+    NEWS_API_KEY = config("NEWS_API_KEY")  # bug fix: pehle yahan actual key string hardcoded thi
     news_headlines = []
     res = requests.get(
         f"https://newsapi.org/v2/top-headlines?country=in&apiKey={NEWS_API_KEY}&category=general").json()
@@ -137,203 +186,131 @@ def get_latest_news():
         news_headlines.append(article["title"])
     return news_headlines[:5]
 
+
 def get_random_joke():
-    headers = {
-        'Accept': 'application/json'
-    }
+    headers = {'Accept': 'application/json'}
     res = requests.get("https://icanhazdadjoke.com/", headers=headers).json()
     return res["joke"]
+
 
 def get_random_advice():
     res = requests.get("https://api.adviceslip.com/advice").json()
     return res['slip']['advice']
 
 
-
-  #///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-
-
-
-
-
-# OPENWEATHER_APP_ID = config("OPENWEATHER_APP_ID")  
-# def get_weather_report(city):
-#     res = requests.get(
-#         f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_APP_ID}&units=metric").json()
-#     weather = res["weather"][0]["main"]
-#     temperature = res["main"]["temp"]
-#     feels_like = res["main"]["feels_like"]
-#     return weather, f"{temperature}℃", f"{feels_like}℃"
-
-
-
-
-
-
-# //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+# ------------------------------------------------------------------
+# MAIN LOOP -> continuous, hands-free chalega (jaise ChatGPT/Gemini
+# voice mode) -- koi menu ya keypress nahi, bas bolte raho
+# ------------------------------------------------------------------
 if __name__ == "__main__":
-    speak(" hi sir")
+
+    paths = {
+        'notepad': "C:\\Program Files\\Notepad++\\notepad++.exe",
+        'calculator': "C:\\Windows\\System32\\calc.exe"
+    }
+
+    speak("Hi sir")
     wishMe()
+    print("\nJarvis is listening continuously. Say 'stop listening' anytime to exit.\n")
+
+    EXIT_PHRASES = ['stop listening', 'goodbye jarvis', 'exit jarvis', 'quit jarvis', 'bye jarvis']
+
     while True:
-        co = input("Enter 1 for voice.\nEnter any key for text\n Enter option :")
+        query = takeCommand().lower()
 
-        if co == "1":
-            query = takeCommand().lower() #Converting user query into lower case
-        else:
-            query = input("Enter searched text. -->")
+        if query == "none" or query.strip() == "":
+            continue
 
-        # Logic for executing tasks based on query
+        if any(phrase in query for phrase in EXIT_PHRASES):
+            speak("Goodbye sir, talk to you soon!")
+            break
 
-        # if 'wikipedia' in query:  #if wikipedia found in the query then this block will be executed
-        #     speak('Searching Wikipedia...')
-        #     query = query.replace("wikipedia", "")
-        #     results = wikipedia.summary(query, sentences=2) 
-        #     speak("According to Wikipedia")
-        #     print(results)
-        #     speak(results)
+        # ---------------- FAST, INSTANT COMMANDS (no API call needed) ----------------
 
-        try:
+        if query.startswith("open "):
+            application = query.replace("open ", "").strip()
+            speak(f"Opening {application}")
 
-            if (query.index("open ") == 0):
-                lst = query.split()
-                application = lst[1]
-                speak("user is trying to open" + application)
-                
-        
-        except:
-       
-            if 'open youtube' in query:
+            if 'youtube' in query:
                 webbrowser.open("youtube.com")
-    
-            elif 'open google' in query:
+            elif 'google' in query:
                 webbrowser.open("google.com")
-
-            elif 'open stackover' in query:
+            elif 'stackover' in query:
                 webbrowser.open("stackoverflow.com")
-            
-            elif 'open notepad' in query:
+            elif 'notepad' in query:
                 open_notepad()
-
-
-            elif 'open command prompt' in query or 'open cmd' in query:
+            elif 'command prompt' in query or 'cmd' in query:
                 open_cmd()
-
-            elif 'open camera' in query:
+            elif 'camera' in query:
                 open_camera()
-
-            elif 'open calculator' in query:
+            elif 'calculator' in query:
                 open_calculator()
-
-            elif 'play music' in query:
-                music_dir = 'D:\\Non Critical\\songs\\Favorite Song2'               
-                songs = os.listdir(music_dir)
-                print(songs)
-                os.startfile(os.path.join(music_dir, songs[0]))
-
-            elif 'the time' in query:
-                strTime = str(datetime.datetime.now().strftime("%H:%M:%S"))
-                print(f"sir, the time is {strTime}")
-                speak(f"sir, the time is {strTime}") 
-                # pprint( strTime)
-                
-                
-
-            elif "send whatsapp message" in query:
-                speak('On what number should I send the message sir? Please enter in the console: ')
-                number = input("Enter the number: ")
-                speak("What is the message sir?")
-                message = input("Enter the message: ")
-                send_whatsapp_message(number, message)
-                speak("I've sent the message sir.")
-
-            
-            elif 'from google' in query:
-                speak('What do you want to search on Google, sir?')
-                query = input("Enter the query: ")
-                search_on_google(query)
-
-            
-            elif 'joke' in query:
-                speak(f"Hope you like this one sir")
-                joke = get_random_joke()
-                speak(joke)
-                speak("For your convenience, I am printing it on the screen sir.")
-                pprint(joke)
-
-            elif "advice" in query:
-                speak(f"Here's an advice for you, sir")
-                advice = get_random_advice()
-                speak(advice)
-                speak("For your convenience, I am printing it on the screen sir.")
-                pprint(advice)
-
-
-
-            # ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-            
-            # elif "trending movies" in query:
-            #     speak(f"Some of the trending movies are: {get_trending_movies()}")
-            #     speak("For your convenience, I am printing it on the screen sir.")
-            #     print(*get_trending_movies(), sep='\n')
-
-            # ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-            elif 'news' in query:
-                speak(f"I'm reading out the latest news headlines, sir")
-                speak(get_latest_news())
-                speak("For your convenience, I am printing it on the screen sir.")
-                print(*get_latest_news(), sep='\n')
-
-            # //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-            # elif 'weather' in query:
-            #     ip_address = find_my_ip()
-            #     city = requests.get(f"https://ipapi.co/{ip_address}/city/").text
-            #     speak(f"Getting weather report for your city {city}")
-            #     weather, temperature, feels_like = get_weather_report(city)
-            #     speak(f"The current temperature is {temperature}, but it feels like {feels_like}")
-            #     speak(f"Also, the weather report talks about {weather}")
-            #     speak("For your convenience, I am printing it on the screen sir.")
-            #     print(f"Description: {weather}\nTemperature: {temperature}\nFeels like: {feels_like}")
-
-
-
-
-            # ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-
-            elif 'open code' in query:
+            elif 'code' in query:
                 codePath = "C:\\Users\\Lenovo\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
                 os.startfile(codePath)
-
-            elif 'open game' in query:
+            elif 'game' in query:
                 gamePath = "C:\\Users\\Lenovo\\Downloads\\Grand Theft Auto Vice City Full Version\\gta-vc.exe"
                 os.startfile(gamePath)
-                paths = {'notepad': "C:\\Program Files\\Notepad++\\notepad++.exe",
-                'calculator': "C:\\Windows\\System32\\calc.exe"}
+            else:
+                speak("Sorry sir, I don't know how to open this application yet.")
 
-            else:  #if wikipedia found in the query then this block will be executed
-                speak('Searching ${query} in Wikipedia...')
-                query = query.replace("wikipedia", "")
-                results = wikipedia.summary(query, sentences=2) 
+        elif 'play music' in query:
+            music_dir = 'D:\\Non Critical\\songs\\Favorite Song2'
+            songs = os.listdir(music_dir)
+            if songs:
+                os.startfile(os.path.join(music_dir, songs[0]))
+            else:
+                speak("No songs found in the directory, sir.")
+
+        elif 'the time' in query:
+            strTime = str(datetime.datetime.now().strftime("%H:%M:%S"))
+            print(f"sir, the time is {strTime}")
+            speak(f"sir, the time is {strTime}")
+
+        elif "send whatsapp message" in query:
+            speak('On what number should I send the message, sir?')
+            number = takeCommand()
+            speak("What is the message, sir?")
+            message = takeCommand()
+            send_whatsapp_message(number, message)
+            speak("I've sent the message sir.")
+
+        elif 'search on google' in query or 'google search' in query:
+            speak('What do you want to search on Google, sir?')
+            search_query = takeCommand()
+            search_on_google(search_query)
+
+        elif 'joke' in query:
+            speak("Hope you like this one sir")
+            joke = get_random_joke()
+            speak(joke)
+            pprint(joke)
+
+        elif "advice" in query:
+            speak("Here's an advice for you, sir")
+            advice = get_random_advice()
+            speak(advice)
+            pprint(advice)
+
+        elif 'news' in query:
+            speak("I'm reading out the latest news headlines, sir")
+            headlines = get_latest_news()
+            for h in headlines:
+                speak(h)
+            print(*headlines, sep='\n')
+
+        elif 'wikipedia' in query:
+            speak('Searching Wikipedia...')
+            wiki_query = query.replace("wikipedia", "").strip()
+            try:
+                results = wikipedia.summary(wiki_query, sentences=2)
                 speak("According to Wikipedia")
                 print(results)
                 speak(results)
+            except Exception:
+                speak("Sorry sir, I couldn't find anything relevant on Wikipedia.")
 
-            # else:
-            #     speak("I am not answerable to this quistions?")
-            #     speak('I feel better Thank you for it')
+        # ---------------- EVERYTHING ELSE -> NATURAL CONVERSATION VIA GEMINI ----------------
 
-
-
-    # /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-
-
-
+        else:
+            ask_jarvis(query)
